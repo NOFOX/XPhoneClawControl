@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phone Wall - 8x3 Fixed Grid</title>
+<style>
+/* ===== Global Reset ===== */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/*
+ * Page body: full viewport, no scroll on body itself.
+ * Actual scroll is handled by .phone-wall container.
+ */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #121218;
+  color: #e0e0e0;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ===== Toolbar (top bar) ===== */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+  height: 46px;
+  background: #0a0a10;
+  border-bottom: 1px solid #1e1e28;
+  font-size: 13px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+/* Brand label */
+.toolbar .brand {
+  font-weight: 700;
+  font-size: 14px;
+  color: #ff6b6b; /* accent color */
+  margin-right: auto; /* push everything to the right */
+  letter-spacing: 0.5px;
+}
+
+/* Device count dropdown */
+.toolbar .count-select {
+  background: #16161e;
+  color: #ccc;
+  border: 1px solid #2a2a38;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.toolbar .count-select:hover { border-color: #444; }
+.toolbar .count-select option { background: #1a1a28; }
+
+/* Hint text */
+.toolbar .hint { color: #444; font-size: 11px; }
+
+/* ===== Phone Wall Container ===== */
+/*
+ * Full-height scrollable area below toolbar.
+ * Both vertical and horizontal scroll are enabled for when
+ * the grid overflows viewport dimensions.
+ */
+.phone-wall {
+  height: calc(100vh - 46px); /* subtract toolbar height */
+  overflow-y: auto;
+  overflow-x: auto;
+  display: flex;
+  align-items: flex-start;
+  padding-top: 0;
+  background: #121218;
+  scrollbar-width: thin;
+  scrollbar-color: #222 #121218;
+}
+/* WebKit scrollbar styling */
+.phone-wall::-webkit-scrollbar { width: 8px; height: 8px; }
+.phone-wall::-webkit-scrollbar-track { background: #121218; }
+.phone-wall::-webkit-scrollbar-thumb {
+  background: #222;
+  border-radius: 4px;
+}
+.phone-wall::-webkit-scrollbar-thumb:hover { background: #333; }
+
+/*
+ * 8-column CSS Grid Layout
+ * 
+ * Key design decisions:
+ * - FIXED grid of 8 columns: always 8 slots across, regardless of device count
+ * - Card width (--cw) is computed at runtime based on viewport width / 8
+ * - Grid container width = 8 * cardWidth + 7 * gap (full 8 columns)
+ * - margin: 0 auto centers the grid horizontally in the viewport
+ * - Each phone card occupies exactly one grid cell
+ * - Unused slots (when device count < 24) are hidden via display:none
+ * - Cards maintain a 9:16 aspect ratio (portrait phone frame)
+ */
+.grid-area {
+  display: grid;
+  grid-template-columns: repeat(8, var(--cw)); /* 8 fixed-width columns */
+  gap: var(--gap);
+  padding: 12px;
+  width: calc(8 * var(--cw) + 7 * var(--gap)); /* force grid width */
+  margin: 0 auto; /* center horizontally */
+}
+
+/*
+ * Phone Card / Device Slot
+ * 
+ * Each card has:
+ * - status indicator dot (top-right, green = online, red = offline)
+ * - phone screen area (center, 9:16 aspect ratio, dark background)
+ * - device name label bar (bottom, truncated if too long)
+ * - hover effect (red border lift with shadow)
+ */
+.slot {
+  background: #16161e;
+  border: 2px solid #222230;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  width: var(--cw);     /* fixed card width from CSS variable */
+  height: auto;
+  position: relative;
+  transition: border-color 0.15s, transform 0.12s, box-shadow 0.15s;
+  will-change: transform;
+  display: none;        /* hidden by default, shown by .vis class */
+}
+.slot.vis { display: block; }
+.slot:hover {
+  border-color: #ff6b6b;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(255, 107, 107, 0.15);
+  z-index: 10;
+}
+
+/* Status indicator dot: shows device online/offline */
+.slot .dot {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  z-index: 20;
+}
+.slot .dot.on {
+  background: #4caf50;
+  box-shadow: 0 0 6px #4caf5088;
+}
+.slot .dot.off { background: #f44336; }
+
+/* Phone screen area inside each card */
+.slot .screen {
+  width: 100%;
+  aspect-ratio: 9/16;
+  background: #050510;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+}
+/* Camera notch dot */
+.slot .screen .cam {
+  width: 5px;
+  height: 5px;
+  background: #222;
+  border-radius: 50%;
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+}
+/* Placeholder content for card screen */
+.slot .screen .placeholder-icon {
+  font-size: 24px;
+  opacity: 0.12;
+  margin-bottom: 4px;
+}
+.slot .screen .placeholder-text {
+  font-size: 9px;
+  color: #333;
+}
+
+/* Device name label bar at bottom of card */
+.slot .label-bar {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0e0e14;
+  font-size: 8px;
+  color: #555;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 0 4px;
+}
+
+/* ===== Expand Overlay (click-to-expand panel) ===== */
+/*
+ * Full-screen dark overlay shown when a phone card is clicked.
+ * Contains:
+ * - Expanded phone screen (9:16 aspect ratio, centered)
+ * - Action toolbar (screenshot, record, keyboard/mouse, rotate, fullscreen, close)
+ */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s;
+}
+.overlay.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Panel: rounded card container for expanded view */
+.overlay .panel {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, calc(100vw - 40px));
+  background: #0a0a10;
+  border: 2px solid #2a2a38;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 0 60px rgba(255, 107, 107, 0.08);
+  transform: scale(0.9);
+  opacity: 0;
+  transition: transform 0.22s ease-out, opacity 0.15s;
+}
+.overlay.show .panel {
+  transform: scale(1);
+  opacity: 1;
+}
+
+/*
+ * Expanded phone screen area.
+ *
+ * scrcpy mirrors the phone screen and draws its own control toolbar at the top
+ * of the mirrored stream (the dark bar with screenshot, record, keyboard, etc.
+ * buttons). That toolbar is part of the video frame — it's NOT chrome we control.
+ *
+ * Layout breakdown (vertical):
+ *   .panel          → fixed-width card, height determined by content
+ *     .expanded-screen → the phone display area (9:16 aspect ratio)
+ *       .scrcpy-tool-strip   → scrcpy's built-in toolbar inside the stream
+ *       .screen-content      → actual phone UI below the toolbar
+ *         .top-bar           → our overlay info bar (device name + close)
+ *         .mirror-area       → placeholder for the live mirrored content
+ *
+ * The .scrcpy-tool-strip sits at the very top of the phone screen area, above
+ * the actual phone content. In the real QtScrcpy build the toolbar height is
+ * roughly 36-48px depending on DPI. We use 40px here as a design assumption.
+ *
+ * .screen-content starts right after .scrcpy-tool-strip and carries the 9:16
+ * aspect ratio so the mirrored phone displays at the correct proportions.
+ */
+.panel .expanded-screen {
+  width: 100%;
+  background: #050510;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* max-height: fill remaining viewport above actions bar */
+}
+/* scrcpy's own toolbar (part of the mirrored stream) */
+.panel .exp-screen .scrcpy-tool-strip {
+  height: 40px;
+  background: linear-gradient(180deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.5) 60%, transparent 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.panel .exp-screen .scrcpy-tool-strip .scrcpy-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 4px;
+  color: #777;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.panel .exp-screen .scrcpy-tool-strip .scrcpy-btn:hover {
+  background: rgba(255,107,107,0.2);
+  color: #ff6b6b;
+  border-color: rgba(255,107,107,0.3);
+}
+/* The phone content area below scrcpy's toolbar — keeps 9:16 aspect ratio */
+.panel .exp-screen .screen-content {
+  width: 100%;
+  aspect-ratio: 9/16;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* ensure the aspect ratio area starts AFTER the tool strip */
+}
+.panel .exp-screen .screen-content .top-bar {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
+  z-index: 2;
+}
+.panel .exp-screen .screen-content .top-bar .dev-title {
+  font-size: 12px;
+  color: #ff6b6b;
+  font-weight: 600;
+}
+.panel .exp-screen .screen-content .top-bar .close-sm {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255,255,255,0.1);
+  border-radius: 50%;
+  color: #888;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.panel .exp-screen .screen-content .top-bar .close-sm:hover { background: rgba(255,255,255,0.2); }
+/* Actual mirror display area — takes remaining space below top-bar */
+.panel .exp-screen .screen-content .mirror-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  position: relative;
+  z-index: 1;
+}
+.panel .exp-screen .screen-content .mirror-area .big-icon {
+  font-size: 48px;
+  opacity: 0.08;
+  margin-bottom: 8px;
+}
+.panel .exp-screen .screen-content .mirror-area .big-label {
+  color: #444;
+  font-size: 13px;
+  margin-bottom: 3px;
+}
+.panel .exp-screen .screen-content .mirror-area .big-sub {
+  color: #333;
+  font-size: 11px;
+}
+/* Note: .big-icon, .big-label, .big-sub class names moved into .mirror-area */
+
+/* Action toolbar below expanded screen */
+.panel .actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #0e0e14;
+  border-top: 1px solid #1a1a24;
+  flex-wrap: wrap;
+}
+.panel .actions button {
+  background: #16161e;
+  color: #aaa;
+  border: 1px solid #222230;
+  padding: 5px 12px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.12s, color 0.12s;
+}
+.panel .actions button:hover {
+  background: #1e2a3a;
+  color: #d0d0d0;
+}
+.panel .actions .close-btn {
+  margin-left: auto;
+  background: #2a1520;
+  color: #ff6b6b;
+  border-color: #3a2030;
+}
+.panel .actions .close-btn:hover { background: #3a2030; }
+</style>
+</head>
+<body>
+
+<!-- ===== TOOLBAR ===== -->
+<div class="toolbar">
+  <span class="brand">PHONES</span>
+  <select id="count" class="count-select">
+    <option value="4" selected>4</option>
+    <option value="8">8</option>
+    <option value="12">12</option>
+    <option value="16">16</option>
+    <option value="18">18</option>
+    <option value="24">24</option>
+  </select>
+  <span class="hint">台设备 (8列固定宽度)</span>
+</div>
+
+<!-- ===== PHONE WALL (main grid area) ===== -->
+<div class="phone-wall" id="wall">
+  <div class="grid-area" id="grid"></div>
+</div>
+
+<!-- ===== EXPAND OVERLAY (device detail panel) ===== -->
+<!--
+  Panel structure:
+    .overlay
+      .panel
+        .expanded-screen          → outer container, fills available height
+          .exp-screen
+            .scrcpy-tool-strip    → scrcpy's own toolbar (40px, part of the stream)
+            .screen-content       → actual phone UI (9:16 aspect ratio)
+              .top-bar            → our info bar (device name + close)
+              .mirror-area        → placeholder for the live mirrored content
+        .actions                  → action toolbar below screen
+-->
+<div class="overlay" id="overlay">
+  <div class="panel">
+    <div class="expanded-screen">
+      <div class="exp-screen">
+        <!-- scrcpy's built-in toolbar (part of video stream, not our chrome) -->
+        <div class="scrcpy-tool-strip">
+          <span class="scrcpy-btn" title="截屏">&#128248;</span>
+          <span class="scrcpy-btn" title="录屏">&#128265;</span>
+          <span class="scrcpy-btn" title="键盘">&#9997;</span>
+          <span class="scrcpy-btn" title="鼠标">&#128254;</span>
+          <span class="scrcpy-btn" title="全屏">&#10064;</span>
+        </div>
+        <!-- Phone content area with 9:16 aspect ratio -->
+        <div class="screen-content">
+          <div class="top-bar">
+            <span class="dev-title" id="devName"></span>
+            <span class="close-sm" id="closeSm">&#10005;</span>
+          </div>
+          <div class="mirror-area">
+            <div class="big-icon">&#128241;</div>
+            <div class="big-label">&#23454;&#26102;&#30011;&#38754;</div>
+            <div class="big-sub">9:16 &#20849;&#23637;&#25233;&#23646;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="actions">
+      <button>&#128248; &#25668;&#22270;</button>
+      <button>&#128265; &#24405;&#23651;</button>
+      <button>&#9997;&#65039; &#38190;&#38169;</button>
+      <button>&#128254; &#26032;&#36716;</button>
+      <button>&#10064; &#20840;&#23637;</button>
+      <button class="close-btn" id="closeMain">&#10005; &#20851;&#38381;</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+ * ================================================================
+ * Phone Wall - 8x3 Fixed Grid Sketch
+ * ================================================================
+ * 
+ * PURPOSE:
+ *   A responsive full-screen phone device management dashboard.
+ *   Displays up to 24 phone devices in a fixed 8-column x 3-row grid.
+ *   Cards maintain fixed size regardless of device count.
+ *   Clicking any card opens an expanded overlay with device actions.
+ * 
+ * LAYOUT MATH:
+ *   - Grid columns are always 8, fixed by grid-template-columns: repeat(8, var(--cw))
+ *   - Card width = (viewportWidth - 2*padding - 7*gap) / 8
+ *   - Card height = cardWidth * (16/9) [9:16 portrait aspect ratio]
+ *   - Max 3 rows to fit in viewport: cardHeight <= (viewportHeight - toolbar - 2*padding - 2*gap) / 3
+ *   - Grid container width = 8 * cardWidth + 7 * gap (fills full horizontal space)
+ * 
+ * DEVICE COUNT OPTIONS:
+ *   4  -> first 4 slots filled, 20 empty
+ *   8  -> first 8 slots filled, 16 empty
+ *   12 -> first 12 slots filled, 12 empty
+ *   16 -> first 16 slots filled, 8 empty
+ *   18 -> first 18 slots filled, 6 empty
+ *   24 -> all 24 slots filled
+ * 
+ * ================================================================
+ */
+
+// ===== Configuration Constants =====
+const COLS = 8;           // Number of columns in the fixed grid
+const ROWS = 3;           // Maximum number of rows
+const GAP = 8;            // Gap between grid items (px)
+const PADDING = 12;       // Padding around grid container (px)
+
+/**
+ * Device name list: 24 mock device names corresponding to slots 0-23.
+ */
+const deviceNames = [
+  'Pixel-7-Pro','Galaxy-S24','iPhone-15','OnePlus-12',
+  'Xiaomi-14','Honor-Magic6','Vivo-X100','Oppo-Reno',
+  'Samsung-A54','Motorola-Edge','Realme-11','Nubia-Z60',
+  'Nothing-PH2','Sony-Xperia','LG-GPad','RedMagic-9',
+  'ASUS-ROG','BlackShark-5','Cuco-C70','Infinix-ZT',
+  'Tecno-Pova','Itel-S23','Samsung-M14','Nokia-G42'
+];
+
+// Allowed device count values (shown in the dropdown)
+const deviceCounts = [4, 8, 12, 16, 18, 24];
+let currentCount = 4; // Currently displayed device count
+let currentCardW = 0; // Computed card width (px)
+let currentCardH = 0; // Computed card height (px)
+
+/**
+ * Get the number of columns used at this device count.
+ * Returns Math.min(8, count) - grid always has max 8 columns.
+ * @param {number} count - Number of devices to display
+ * @returns {number} Number of columns (1 to 8)
+ */
+function getCols(count) {
+  return Math.min(8, count);
+}
+
+/* ===== CORE: Calculate card dimensions and set CSS variables =====
+ * 
+ * Called whenever viewport resizes or device count changes.
+ * Computes fixed card size based on:
+ *   1. Available width / 8 columns gives card width
+ *   2. Card height = width * 16/9 maintains phone aspect ratio
+ *   3. Maximum 3 rows fit in available viewport height
+ *   4. Minimum card size is 64px wide
+ * 
+ * Sets CSS custom properties (--cw, --gap, --rh) for the CSS grid.
+ */
+function recalc() {
+  const winW = window.innerWidth;
+  const winH = window.innerHeight;
+  const availableW = winW - PADDING * 2;
+  const availableH = winH - 46 - PADDING * 2; // subtract toolbar
+
+  // Always divide by 8 columns for consistent card sizing
+  let cardW = Math.floor((availableW - GAP * 7) / 8);
+  let cardH = Math.floor(cardW * (16 / 9));
+
+  // Ensure max 3 rows fit in viewport
+  const maxH = Math.floor((availableH - GAP * 2) / 3);
+  if (cardH > maxH) {
+    cardH = maxH;
+    cardW = Math.floor(cardH * (9 / 16));
+  }
+
+  // Enforce minimum card size
+  cardW = Math.max(cardW, 64);
+  cardH = Math.max(cardH, Math.floor(cardW * 0.563));
+
+  // Store computed dimensions
+  currentCardW = cardW;
+  currentCardH = cardH;
+
+  // Apply as CSS custom properties for the grid layout
+  const grid = document.getElementById('grid');
+  grid.style.setProperty('--cw', cardW + 'px');
+  grid.style.setProperty('--gap', GAP + 'px');
+  grid.style.setProperty('--rh', cardH + 'px');
+}
+
+/* ===== Render: Create slot elements for the grid =====
+ * 
+ * @param {number} count - Number of devices to display
+ * 
+ * For each device index 0..count-1, creates a ".slot.vis" element
+ * (visible slot with device info). For indices count..totalCells-1,
+ * creates a ".slot" element (hidden slot, preserves grid structure).
+ * 
+ * The grid always has space for 8*3=24 slots, but only `count` are visible.
+ */
+function render(count) {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+
+  const cols = getCols(count);
+
+  // Create visible slots for each device
+  for (let i = 0; i < count; i++) {
+    const slot = document.createElement('div');
+    slot.classList.add('slot', 'vis');
+    slot.dataset.idx = i;
+    slot.title = deviceNames[i] + ' (click to expand)';
+
+    // Randomize online status: ~80% chance online
+    const online = Math.random() > 0.2;
+    slot.innerHTML = `
+      <div class="dot ${online ? 'on' : 'off'}"></div>
+      <div class="screen">
+        <div class="cam"></div>
+        <div class="placeholder-icon">&#128241;</div>
+        <div class="placeholder-text">${deviceNames[i]}</div>
+      </div>
+      <div class="label-bar" title="${deviceNames[i]}">${deviceNames[i]}</div>
+    `;
+    slot.addEventListener('click', () => openExpand(i));
+
+    grid.appendChild(slot);
+  }
+
+  // Create hidden slots to fill remaining grid positions
+  // Always use 8 columns for correct grid width (fixes bug when count < 8)
+  const totalCells = 8 * Math.ceil(count / 8);
+  for (let i = count; i < totalCells; i++) {
+    const slot = document.createElement('div');
+    slot.classList.add('slot');
+    grid.appendChild(slot);
+  }
+}
+
+/* ===== Expand Overlay: Show device detail panel =====
+ * 
+ * When a phone card is clicked, shows a full-screen overlay
+ * with an expanded view of that device and action buttons.
+ * 
+ * @param {number} idx - Index into deviceNames array
+ */
+const overlay = document.getElementById('overlay');
+function openExpand(idx) {
+  document.getElementById('devName').textContent = deviceNames[idx];
+  overlay.classList.add('show');
+}
+function closeExpand() {
+  overlay.classList.remove('show');
+}
+overlay.addEventListener('click', (e) => {
+  if (e.target === overlay) closeExpand();
+});
+document.getElementById('closeSm').addEventListener('click', closeExpand);
+document.getElementById('closeMain').addEventListener('click', closeExpand);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeExpand();
+});
+
+/* ===== Show/Render: Set device count, recalc size, and render the grid ===== */
+function show(count) {
+  currentCount = count;
+  const select = document.getElementById('count');
+  if (select) select.value = count;
+  recalc();
+  render(count);
+}
+
+/* ===== Dropdown Handler: Change device count ===== */
+document.getElementById('count').addEventListener('change', function() {
+  show(parseInt(this.value));
+});
+
+/* ===== Resize Handler: Recalculate and re-render on viewport change ===== */
+window.addEventListener('resize', () => {
+  recalc();
+  render(currentCount);
+});
+
+/* ===== Initialize: render initial grid on page load ===== */
+recalc();
+show(currentCount);
+</script>
+
+</body>
+</html>
