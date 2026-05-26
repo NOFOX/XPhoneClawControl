@@ -37,8 +37,9 @@ device_lock = threading.Lock()
 # scrcpy 服务端口范围
 SCRCPY_BASE_PORT = 27183
 
-# 模拟模式（无真实设备时使用）
+# 模拟模式（无真实设备时自动启用）
 SIMULATION_MODE = os.environ.get('SIMULATION_MODE', 'false').lower() == 'true'
+demo_mode = False  # 运行时动态检测模式
 
 
 def check_adb_installed():
@@ -60,35 +61,76 @@ def check_scrcpy_installed():
 
 
 def get_device_serials():
-    """通过 adb 获取已连接的设备序列号列表"""
-    if SIMULATION_MODE:
-        # 模拟模式下返回虚拟设备
-        return [f'EMULATOR-{i:04d}' for i in range(6)]
+    """
+    通过 adb 获取已连接的设备序列号列表，支持 USB 和无线调试。
+    自动检测：无设备时启用模拟模式，有设备时退出模拟模式。
+    """
+    global demo_mode
+    
+    # 如果强制模拟模式，直接返回虚拟设备
+    if os.environ.get('SIMULATION_MODE', 'false').lower() == 'true':
+        return [f'EMULATOR-{i:04d}' for i in range(24)]  # 24 台虚拟设备
     
     try:
-        result = subprocess.run(
-            ['adb', 'devices'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+        # 多次尝试检测，防止 ADB 服务启动延迟
+        result = None
+        for attempt in range(3):
+            result = subprocess.run(
+                ['adb', 'devices'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                break
+            time.sleep(1)
+        
+        if result is None or result.returncode != 0:
+            print(f"⚠️ ADB 命令执行失败")
+            # ADB 不可用，进入模拟模式
+            if not demo_mode:
+                print("ℹ️ 未检测到 ADB，自动进入演示模式")
+                demo_mode = True
+            return [f'EMULATOR-{i:04d}' for i in range(24)]
+        
         lines = result.stdout.strip().split('\n')[1:]  # 跳过标题行
         serials = []
         for line in lines:
             parts = line.split()
             if len(parts) >= 2 and parts[1] == 'device':
                 serials.append(parts[0])
-        return serials
+        
+        # 动态调整模式
+        if len(serials) > 0:
+            if demo_mode:
+                print(f"ℹ️ 检测到 {len(serials)} 个真实设备，已退出演示模式")
+                demo_mode = False
+            return serials
+        else:
+            if not demo_mode:
+                print("ℹ️ 未检测到真实设备，自动进入演示模式")
+                demo_mode = True
+            # 返回 24 台虚拟设备用于演示
+            return [f'EMULATOR-{i:04d}' for i in range(24)]
+            
+    except FileNotFoundError:
+        print("⚠️ ADB 未找到，自动进入演示模式")
+        if not demo_mode:
+            demo_mode = True
+        return [f'EMULATOR-{i:04d}' for i in range(24)]
     except Exception as e:
         print(f"获取设备列表失败：{e}")
-        return []
+        if not demo_mode:
+            demo_mode = True
+        return [f'EMULATOR-{i:04d}' for i in range(24)]
 
 
 def get_device_model(serial):
     """获取设备型号名称"""
-    if SIMULATION_MODE:
+    # 检查是否为模拟设备
+    if serial.startswith('EMULATOR-') or demo_mode:
         # 模拟模式下的虚拟设备名称
-        models = ['Pixel-7-Pro', 'Galaxy-S24', 'Xiaomi-14', 'OnePlus-12', 'iPhone-15', 'Honor-Magic6']
+        models = ['Pixel-7-Pro', 'Galaxy-S24', 'Xiaomi-14', 'OnePlus-12', 'Honor-Magic6', 'Vivo-X100']
         idx = int(serial.split('-')[1]) % len(models)
         return f"{models[idx]}-{serial[-4:]}"
     
@@ -109,7 +151,8 @@ def get_device_model(serial):
 
 def start_scrcpy_stream(serial, port):
     """启动 scrcpy 视频流服务"""
-    if SIMULATION_MODE:
+    # 检查是否为模拟设备
+    if serial.startswith('EMULATOR-') or demo_mode:
         # 模拟模式下不实际启动 scrcpy
         print(f"[模拟] 启动设备流：{serial} 端口:{port}")
         return None
@@ -498,8 +541,8 @@ if __name__ == '__main__':
         print("  macOS: brew install adb scrcpy")
         print("=" * 50 + "\n")
         
-        # 自动启用模拟模式
-        SIMULATION_MODE = True
+        # 自动启用演示模式
+        demo_mode = True
     
     # 启动设备检查线程
     check_thread = threading.Thread(target=periodic_device_check, daemon=True)
@@ -508,10 +551,10 @@ if __name__ == '__main__':
     print("=" * 50)
     print("XPhoneClawControl - 手机群控系统")
     print("=" * 50)
-    if SIMULATION_MODE:
-        print("运行模式：SIMULATION (模拟模式)")
+    if demo_mode:
+        print("运行模式：DEMO (演示模式 - 无真实设备)")
     else:
-        print("运行模式：PRODUCTION (生产模式)")
+        print("运行模式：PRODUCTION (生产模式 - 有真实设备)")
     print("访问地址：http://localhost:5000")
     print("按 Ctrl+C 停止服务")
     print("=" * 50)
