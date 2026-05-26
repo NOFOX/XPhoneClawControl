@@ -36,10 +36,11 @@ device_lock = threading.Lock()
 
 # scrcpy 服务端口范围
 SCRCPY_BASE_PORT = 27183
+DEVICE_STATUS_IDLE = 'idle'
 
 # 模拟模式（无真实设备时自动启用）
 SIMULATION_MODE = os.environ.get('SIMULATION_MODE', 'false').lower() == 'true'
-demo_mode = False  # 运行时动态检测模式
+demo_mode = SIMULATION_MODE  # 运行时动态检测模式
 
 
 def check_adb_installed():
@@ -68,7 +69,8 @@ def get_device_serials():
     global demo_mode
     
     # 如果强制模拟模式，直接返回虚拟设备
-    if os.environ.get('SIMULATION_MODE', 'false').lower() == 'true':
+    if SIMULATION_MODE:
+        demo_mode = True
         return [f'EMULATOR-{i:04d}' for i in range(24)]  # 24 台虚拟设备
     
     try:
@@ -149,6 +151,16 @@ def get_device_model(serial):
         return f"Device-{serial[-6:]}"
 
 
+def allocate_stream_port():
+    """分配未使用的 scrcpy 端口"""
+    used_ports = {info.get('stream_port') for info in devices.values() if info.get('stream_port')}
+    for offset in range(24):
+        port = SCRCPY_BASE_PORT + offset
+        if port not in used_ports:
+            return port
+    return SCRCPY_BASE_PORT + len(used_ports)
+
+
 def start_scrcpy_stream(serial, port):
     """启动 scrcpy 视频流服务"""
     # 检查是否为模拟设备
@@ -187,28 +199,84 @@ def start_scrcpy_stream(serial, port):
         return None
 
 
-def stop_scrcpy_stream(serial):
-    """停止设备的 scrcpy 流"""
+def stop_device_recording(serial, record_proc, record_file):
+    """停止设备录屏并拉取录制文件"""
+    if record_proc:
+        try:
+            record_proc.terminate()
+        except Exception:
+            pass
+
+    if not record_file:
+        return None
+
+    if not serial.startswith('EMULATOR-'):
+        local_path = os.path.join('static', 'recordings', os.path.basename(record_file))
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        subprocess.run(
+            ['adb', '-s', serial, 'pull', record_file, local_path],
+            capture_output=True,
+            timeout=15
+        )
+        subprocess.run(
+            ['adb', '-s', serial, 'shell', 'rm', record_file],
+            capture_output=True,
+            timeout=5
+        )
+        return local_path
+    return None
+
+
+def stop_scrcpy_stream(serial, preserve_device=False):
+    """停止设备的 scrcpy 流，如果 preserve_device 为 True，则保留设备条目并标记为空闲"""
+    stopped_recording_file = None
     with device_lock:
-        if serial in devices:
-            dev_info = devices[serial]
-            if dev_info.get('process'):
-                try:
-                    dev_info['process'].terminate()
-                except Exception:
-                    pass
-            # 移除 adb forward
+        if serial not in devices:
+            return None
+
+        dev_info = devices[serial]
+        if dev_info.get('process'):
             try:
-                port = dev_info.get('stream_port')
-                if port:
-                    subprocess.run(
-                        ['adb', '-s', serial, 'forward', '--remove', f'tcp:{port}'],
-                        capture_output=True,
-                        timeout=2
-                    )
+                dev_info['process'].terminate()
             except Exception:
                 pass
+
+        try:
+            port = dev_info.get('stream_port')
+            if port and not serial.startswith('EMULATOR-'):
+                subprocess.run(
+                    ['adb', '-s', serial, 'forward', '--remove', f'tcp:{port}'],
+                    capture_output=True,
+                    timeout=2
+                )
+        except Exception:
+            pass
+
+        record_proc = dev_info.get('record_process')
+        record_file = dev_info.get('record_file')
+        is_recording = dev_info.get('recording')
+
+    if is_recording:
+        stopped_recording_file = stop_device_recording(serial, record_proc, record_file)
+
+    with device_lock:
+        if serial not in devices:
+            return stopped_recording_file
+
+        if preserve_device:
+            devices[serial] = {
+                'status': DEVICE_STATUS_IDLE,
+                'name': dev_info.get('name'),
+                'stream_port': None,
+                'process': None,
+                'recording': False,
+                'record_process': None,
+                'record_file': None
+            }
+        else:
             del devices[serial]
+
+    return stopped_recording_file
 
 
 @socketio.on('connect')
@@ -240,45 +308,43 @@ def handle_start_device(data):
         return
     
     with device_lock:
-        if serial in devices and devices[serial].get('status') == 'online':
+        if serial in devices and devices[serial].get('status') == 'online' and devices[serial].get('stream_port'):
             emit('device_status', {'serial': serial, 'status': 'already_running'})
             return
-    
-    # 启动 scrcpy 流
-    port = SCRCPY_BASE_PORT + list(devices.keys()).index(serial) if serial in devices else SCRCPY_BASE_PORT + len(devices)
-    
+
+    port = allocate_stream_port()
     try:
-        # 检查设备是否在线
-        result = subprocess.run(
-            ['adb', '-s', serial, 'get-state'],
-            capture_output=True,
-            text=True,
-            timeout=3
-        )
-        if result.stdout.strip() != 'device':
-            emit('device_status', {'serial': serial, 'status': 'offline'})
-            return
-        
+        if not (serial.startswith('EMULATOR-') or demo_mode):
+            result = subprocess.run(
+                ['adb', '-s', serial, 'get-state'],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            if result.stdout.strip() != 'device':
+                emit('device_status', {'serial': serial, 'status': 'offline'})
+                return
+
+        proc = start_scrcpy_stream(serial, port)
         model = get_device_model(serial)
-        
+
         with device_lock:
             devices[serial] = {
                 'status': 'online',
                 'name': model,
                 'stream_port': port,
-                'process': None  # scrcpy 进程
+                'process': proc
             }
-        
+
         emit('device_status', {
             'serial': serial,
             'status': 'online',
             'name': model,
             'port': port
         })
-        
-        # 广播设备更新
+
         socketio.emit('devices_updated', get_devices_list())
-        
+
     except Exception as e:
         print(f"启动设备失败 ({serial}): {e}")
         emit('device_status', {'serial': serial, 'status': 'error', 'message': str(e)})
@@ -292,8 +358,89 @@ def handle_stop_device(data):
         emit('error', {'message': '缺少设备序列号'})
         return
     
-    stop_scrcpy_stream(serial)
-    emit('devices_updated', get_devices_list())
+    stop_scrcpy_stream(serial, preserve_device=True)
+    emit('device_status', {'serial': serial, 'status': DEVICE_STATUS_IDLE})
+    socketio.emit('devices_updated', get_devices_list())
+
+
+@socketio.on('start_recording')
+def handle_start_recording(data):
+    """开始设备屏幕录制"""
+    serial = data.get('serial')
+    if not serial:
+        emit('error', {'message': '缺少设备序列号'})
+        return
+
+    with device_lock:
+        if serial not in devices:
+            emit('error', {'message': '设备未找到'})
+            return
+        dev_info = devices[serial]
+        if dev_info.get('recording'):
+            emit('error', {'message': '录屏已在进行中'})
+            return
+
+        timestamp = int(time.time())
+        filename = f"record_{serial.replace(':', '_')}_{timestamp}.mp4"
+        remote_path = f"/sdcard/{filename}"
+
+        if serial.startswith('EMULATOR-') or demo_mode:
+            devices[serial]['recording'] = True
+            devices[serial]['record_file'] = filename
+            emit('recording_started', {'serial': serial})
+            socketio.emit('devices_updated', get_devices_list())
+            return
+
+        try:
+            os.makedirs('static/recordings', exist_ok=True)
+            record_cmd = [
+                'adb', '-s', serial,
+                'shell', 'screenrecord', remote_path
+            ]
+            proc = subprocess.Popen(
+                record_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            devices[serial]['recording'] = True
+            devices[serial]['record_process'] = proc
+            devices[serial]['record_file'] = remote_path
+            emit('recording_started', {'serial': serial})
+            socketio.emit('devices_updated', get_devices_list())
+        except Exception as e:
+            emit('error', {'message': f'开始录屏失败：{str(e)}'})
+
+
+@socketio.on('stop_recording')
+def handle_stop_recording(data):
+    """停止设备屏幕录制并下载录制文件"""
+    serial = data.get('serial')
+    if not serial:
+        emit('error', {'message': '缺少设备序列号'})
+        return
+
+    with device_lock:
+        if serial not in devices:
+            emit('error', {'message': '设备未找到'})
+            return
+        dev_info = devices[serial]
+        if not dev_info.get('recording'):
+            emit('error', {'message': '当前未在录屏'})
+            return
+        record_proc = dev_info.get('record_process')
+        record_file = dev_info.get('record_file')
+
+    local_path = stop_device_recording(serial, record_proc, record_file)
+    with device_lock:
+        devices[serial]['recording'] = False
+        devices[serial]['record_process'] = None
+        devices[serial]['record_file'] = None
+
+    emit('recording_stopped', {
+        'serial': serial,
+        'path': f'/static/recordings/{os.path.basename(local_path)}' if local_path else None
+    })
+    socketio.emit('devices_updated', get_devices_list())
 
 
 @socketio.on('take_screenshot')
@@ -412,7 +559,8 @@ def get_devices_list():
                 'serial': serial,
                 'name': info['name'],
                 'status': info['status'],
-                'port': info.get('stream_port')
+                'port': info.get('stream_port'),
+                'recording': info.get('recording', False)
             }
             for serial, info in devices.items()
         ]
@@ -421,25 +569,30 @@ def get_devices_list():
 def refresh_devices():
     """刷新设备列表并通知客户端"""
     serials = get_device_serials()
-    
+
+    to_remove = []
     with device_lock:
-        # 移除已断开的设备
-        to_remove = [s for s in devices if s not in serials]
-        for serial in to_remove:
-            stop_scrcpy_stream(serial)
-        
-        # 添加新设备
+        for serial in list(devices.keys()):
+            if serial not in serials:
+                to_remove.append(serial)
+
+    for serial in to_remove:
+        stop_scrcpy_stream(serial)
+
+    with device_lock:
         for serial in serials:
             if serial not in devices:
                 model = get_device_model(serial)
                 devices[serial] = {
-                    'status': 'online',
+                    'status': DEVICE_STATUS_IDLE,
                     'name': model,
                     'stream_port': None,
-                    'process': None
+                    'process': None,
+                    'recording': False,
+                    'record_process': None,
+                    'record_file': None
                 }
-    
-    # 发送更新后的设备列表
+
     socketio.emit('devices_updated', get_devices_list())
 
 
@@ -471,28 +624,42 @@ def api_refresh():
 def api_start_device(serial):
     """API: 启动设备流"""
     with device_lock:
-        if serial in devices:
+        if serial in devices and devices[serial].get('status') == 'online' and devices[serial].get('stream_port'):
             return jsonify({'status': 'already_running'})
-    
-    port = SCRCPY_BASE_PORT + len(devices)
-    model = get_device_model(serial)
-    
-    with device_lock:
-        devices[serial] = {
-            'status': 'online',
-            'name': model,
-            'stream_port': port,
-            'process': None
-        }
-    
-    socketio.emit('devices_updated', get_devices_list())
-    return jsonify({'status': 'started', 'port': port})
+
+    port = allocate_stream_port()
+    try:
+        if not (serial.startswith('EMULATOR-') or demo_mode):
+            result = subprocess.run(
+                ['adb', '-s', serial, 'get-state'],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            if result.stdout.strip() != 'device':
+                return jsonify({'status': 'offline'})
+
+        proc = start_scrcpy_stream(serial, port)
+        model = get_device_model(serial)
+
+        with device_lock:
+            devices[serial] = {
+                'status': 'online',
+                'name': model,
+                'stream_port': port,
+                'process': proc
+            }
+
+        socketio.emit('devices_updated', get_devices_list())
+        return jsonify({'status': 'started', 'port': port})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
 
 
 @app.route('/api/device/<serial>/stop', methods=['POST'])
 def api_stop_device(serial):
     """API: 停止设备流"""
-    stop_scrcpy_stream(serial)
+    stop_scrcpy_stream(serial, preserve_device=True)
     socketio.emit('devices_updated', get_devices_list())
     return jsonify({'status': 'stopped'})
 

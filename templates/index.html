@@ -140,6 +140,14 @@ body {
   background: #4caf50;
   box-shadow: 0 0 6px #4caf5088;
 }
+.slot .dot.idle {
+  background: #ffb300;
+  box-shadow: 0 0 6px #ffb30088;
+}
+.slot .dot.recording {
+  background: #3f51b5;
+  box-shadow: 0 0 6px #3f51b588;
+}
 .slot .dot.off { background: #f44336; }
 
 .slot .screen {
@@ -168,6 +176,30 @@ body {
   opacity: 0.12;
   margin-bottom: 4px;
 }
+.slot .screen .status-label {
+  font-size: 9px;
+  color: #999;
+  margin-top: 4px;
+}
+.slot .slot-action {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 3px 7px;
+  font-size: 10px;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.56);
+  color: #f5f5f5;
+  cursor: pointer;
+  z-index: 15;
+  transition: background 0.12s, transform 0.12s;
+}
+.slot .slot-action:hover {
+  background: rgba(255,107,107,0.16);
+}
+.slot .slot-action.start { background: rgba(76,175,80,0.18); }
+.slot .slot-action.stop { background: rgba(244,67,54,0.16); }
 .slot .screen .placeholder-text {
   font-size: 9px;
   color: #333;
@@ -434,6 +466,8 @@ body {
       <button id="actionRecord">&#128265; 录屏</button>
       <button id="actionKeyboard">&#9997;&#65039; 键鼠</button>
       <button id="actionRotate">&#128254; 旋转</button>
+      <button id="actionStart">&#9654; 启动</button>
+      <button id="actionStop">&#128683; 停止</button>
       <button id="actionFullscreen">&#10064; 全屏</button>
       <button class="close-btn" id="closeMain">&#10005; 关闭</button>
     </div>
@@ -451,11 +485,10 @@ const PADDING = 12;
 let socket = null;
 let connectedDevices = [];
 let currentDeviceSerial = null;
+let currentRecording = false;
 
 // Pagination settings
 const DEVICES_PER_PAGE = 24;
-const COLS = 8;
-const ROWS = 3;
 let currentPage = 1;
 let totalPages = 1;
 
@@ -521,18 +554,45 @@ function render() {
       slot.dataset.idx = slotIndex;
       slot.title = device.name + ' (点击展开)';
 
-      const online = device.status === 'online';
+      let statusClass = 'off';
+      let statusText = '离线';
+      if (device.recording) {
+        statusClass = 'recording';
+        statusText = '录屏中';
+      } else if (device.status === 'online') {
+        statusClass = 'on';
+        statusText = '运行中';
+      } else if (device.status === 'idle') {
+        statusClass = 'idle';
+        statusText = '已待机';
+      }
       
+      const actionText = device.status === 'online' ? '停止' : '启动';
+      const actionClass = device.status === 'online' ? 'stop' : 'start';
       slot.innerHTML = `
-        <div class="dot ${online ? 'on' : 'off'}"></div>
+        <div class="dot ${statusClass}"></div>
+        <button class="slot-action ${actionClass}">${actionText}</button>
         <div class="screen">
           <div class="cam"></div>
           <div class="placeholder-icon">&#128241;</div>
           <div class="placeholder-text">${device.name}</div>
+          <div class="status-label">${statusText}</div>
         </div>
         <div class="label-bar" title="${device.name}">${device.name}</div>
       `;
       slot.addEventListener('click', () => openExpand(device));
+      const actionButton = slot.querySelector('.slot-action');
+      if (actionButton) {
+        actionButton.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (!socket || !socket.connected) return;
+          if (device.status === 'online') {
+            socket.emit('stop_device', { serial: device.serial });
+          } else {
+            socket.emit('start_device', { serial: device.serial });
+          }
+        });
+      }
     } else {
       slot.classList.add('slot');
     }
@@ -588,23 +648,79 @@ function openExpand(device) {
   mirrorArea.innerHTML = '<div class="loading-spinner"></div><div style="color:#444;font-size:11px;margin-top:8px;">连接中...</div>';
   
   overlay.classList.add('show');
-  
-  // Request stream start
-  if (socket && socket.connected) {
-    socket.emit('start_device', { serial: device.serial });
+  updateActionButtons(device.status);
+
+  if (device.status === 'online') {
+    setupVideoStream(device.serial, device.port);
+  } else if (device.status === 'idle') {
+    showIdleView(device.serial);
+  } else {
+    showOfflineView(device.serial);
   }
+  updateRecordButton(device.recording);
 }
 
 function closeExpand() {
   overlay.classList.remove('show');
   currentDeviceSerial = null;
+  currentRecording = false;
   
-  // Clean up video element
   const mirrorArea = document.getElementById('mirrorArea');
   mirrorArea.innerHTML = `
     <div class="big-icon">&#128241;</div>
     <div class="big-label">点击卡片查看实时画面</div>
     <div class="big-sub">9:16 共展比例</div>
+  `;
+}
+
+function updateActionButtons(status) {
+  const startBtn = document.getElementById('actionStart');
+  const stopBtn = document.getElementById('actionStop');
+  if (!startBtn || !stopBtn) return;
+
+  if (status === 'online') {
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+  } else {
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
+}
+
+function updateRecordButton(recording) {
+  const recordBtn = document.getElementById('actionRecord');
+  const expRecordBtn = document.getElementById('expRecord');
+  if (!recordBtn || !expRecordBtn) return;
+
+  currentRecording = recording;
+  if (recording) {
+    recordBtn.textContent = '停止录屏';
+    expRecordBtn.textContent = '停止录屏';
+  } else {
+    recordBtn.textContent = '录屏';
+    expRecordBtn.textContent = '录屏';
+  }
+}
+
+function showIdleView(serial) {
+  const mirrorArea = document.getElementById('mirrorArea');
+  mirrorArea.innerHTML = `
+    <div style="color:#ffb300;font-size:12px;text-align:center;">
+      <div>&#128246;</div>
+      <div style="margin-top:8px;">设备已连接，等待启动</div>
+      <div style="color:#555;font-size:10px;margin-top:4px;">${serial}</div>
+    </div>
+  `;
+}
+
+function showOfflineView(serial) {
+  const mirrorArea = document.getElementById('mirrorArea');
+  mirrorArea.innerHTML = `
+    <div style="color:#ff6b6b;font-size:12px;text-align:center;">
+      <div>&#9888;</div>
+      <div style="margin-top:8px;">设备离线，请检查连接</div>
+      <div style="color:#555;font-size:10px;margin-top:4px;">${serial}</div>
+    </div>
   `;
 }
 
@@ -640,17 +756,52 @@ function initSocket() {
     updateDevices(devices);
   });
 
+  socket.on('screenshot_taken', (data) => {
+    console.log('截图完成:', data.path);
+    const mirrorArea = document.getElementById('mirrorArea');
+    mirrorArea.innerHTML = `
+      <div style="width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;">
+        <img src="${data.path}" alt="Screenshot" style="max-width:100%;max-height:100%;border:1px solid #222;" />
+        <div style="color:#aaa;font-size:11px;word-break:break-all;">截图保存于：${data.path}</div>
+      </div>
+    `;
+    alert('截图已保存：' + data.path);
+  });
+
   socket.on('device_status', (data) => {
     console.log('设备状态:', data);
-    if (data.serial === currentDeviceSerial && data.status === 'online') {
-      // Start video stream
+    if (data.serial !== currentDeviceSerial) {
+      return;
+    }
+
+    if (data.status === 'online') {
       setupVideoStream(data.serial, data.port);
+      updateActionButtons('online');
+    } else if (data.status === 'idle') {
+      showIdleView(data.serial);
+      updateActionButtons('idle');
+    } else if (data.status === 'offline') {
+      showOfflineView(data.serial);
+      updateActionButtons('idle');
     }
   });
 
-  socket.on('screenshot_taken', (data) => {
-    console.log('截图完成:', data.path);
-    alert('截图已保存：' + data.path);
+  socket.on('recording_started', (data) => {
+    console.log('录屏开始:', data);
+    if (data.serial === currentDeviceSerial) {
+      updateRecordButton(true);
+      showIdleView(data.serial);
+    }
+  });
+
+  socket.on('recording_stopped', (data) => {
+    console.log('录屏停止:', data);
+    if (data.serial === currentDeviceSerial) {
+      updateRecordButton(false);
+      if (data.path) {
+        alert('录屏已保存：' + data.path);
+      }
+    }
   });
 
   socket.on('error', (data) => {
@@ -662,12 +813,10 @@ function initSocket() {
 function setupVideoStream(serial, port) {
   const mirrorArea = document.getElementById('mirrorArea');
   
-  // For now, show placeholder since we need actual video stream
-  // In production, this would connect to the scrcpy video stream
   mirrorArea.innerHTML = `
     <div style="color:#4caf50;font-size:12px;text-align:center;">
       <div>&#128247;</div>
-      <div style="margin-top:8px;">设备已连接</div>
+      <div style="margin-top:8px;">设备已连接，视频流已启动</div>
       <div style="color:#555;font-size:10px;margin-top:4px;">${serial}</div>
       <div style="color:#555;font-size:10px;">端口：${port || 'N/A'}</div>
     </div>
@@ -697,8 +846,24 @@ document.getElementById('expScreenshot').addEventListener('click', function() {
   }
 });
 
+document.getElementById('expRecord').addEventListener('click', function() {
+  if (currentDeviceSerial && socket) {
+    if (currentRecording) {
+      socket.emit('stop_recording', { serial: currentDeviceSerial });
+    } else {
+      socket.emit('start_recording', { serial: currentDeviceSerial });
+    }
+  }
+});
+
 document.getElementById('actionRecord').addEventListener('click', function() {
-  alert('录屏功能开发中...');
+  if (currentDeviceSerial && socket) {
+    if (currentRecording) {
+      socket.emit('stop_recording', { serial: currentDeviceSerial });
+    } else {
+      socket.emit('start_recording', { serial: currentDeviceSerial });
+    }
+  }
 });
 
 document.getElementById('actionKeyboard').addEventListener('click', function() {
@@ -711,6 +876,18 @@ document.getElementById('actionKeyboard').addEventListener('click', function() {
 document.getElementById('actionRotate').addEventListener('click', function() {
   if (currentDeviceSerial && socket) {
     socket.emit('input_key', { serial: currentDeviceSerial, keycode: 82 }); // MENU key
+  }
+});
+
+document.getElementById('actionStart').addEventListener('click', function() {
+  if (currentDeviceSerial && socket) {
+    socket.emit('start_device', { serial: currentDeviceSerial });
+  }
+});
+
+document.getElementById('actionStop').addEventListener('click', function() {
+  if (currentDeviceSerial && socket) {
+    socket.emit('stop_device', { serial: currentDeviceSerial });
   }
 });
 
