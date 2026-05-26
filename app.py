@@ -443,6 +443,11 @@ def refresh_devices():
     socketio.emit('devices_updated', get_devices_list())
 
 
+# 启动时初始化设备列表
+with app.app_context():
+    refresh_devices()
+
+
 @app.route('/')
 def index():
     """主页 - 渲染手机墙界面"""
